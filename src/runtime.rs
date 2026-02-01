@@ -1,16 +1,14 @@
+use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::sync::RwLock;
-use lazy_static::lazy_static;
-
-// --- Types ---
 
 /// A unique identifier for a specific memory allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Tag(pub u64);
 
 /// Metadata tracked for each allocation.
-/// 
-/// In this "Lite" implementation, we track allocations by their Base Address
+///
+///We track allocations by their Base Address
 /// rather than using a full Shadow Register File, providing O(1) lookup.
 #[derive(Debug, Clone)]
 pub struct AllocationMetadata {
@@ -36,22 +34,25 @@ lazy_static! {
 #[no_mangle]
 pub extern "C" fn capslock_register(base: usize, size: usize) -> u64 {
     let mut map = GLOBAL_SHADOW_MAP.write().unwrap();
-    
+
     // In a full implementation, this would be a random ID.
     // For this prototype, using the base address as the ID is sufficient.
     let tag = Tag(base as u64);
-    
+
     let meta = AllocationMetadata {
         base_addr: base,
         size,
         active_tag: tag,
     };
-    
+
     map.insert(base, meta);
-    
+
     // Log for demonstration purposes
-    println!("[Runtime] ALLOC: Registered {:p} (Size: {}) with Tag {:?}", base as *const (), size, tag);
-    
+    println!(
+        "[Runtime] ALLOC: Registered {:p} (Size: {}) with Tag {:?}",
+        base as *const (), size, tag
+    );
+
     tag.0
 }
 
@@ -60,7 +61,7 @@ pub extern "C" fn capslock_register(base: usize, size: usize) -> u64 {
 #[no_mangle]
 pub extern "C" fn capslock_check(base: usize, expected_tag: u64) {
     let map = GLOBAL_SHADOW_MAP.read().unwrap();
-    
+
     if let Some(meta) = map.get(&base) {
         if meta.active_tag.0 != expected_tag {
             // CRITICAL FAILURE
@@ -70,7 +71,10 @@ pub extern "C" fn capslock_check(base: usize, expected_tag: u64) {
             );
         }
     } else {
-        println!("[Runtime] WARNING: Accessing untracked memory at {:p}", base as *const ());
+        println!(
+            "[Runtime] WARNING: Accessing untracked memory at {:p}",
+            base as *const ()
+        );
     }
 }
 
@@ -79,13 +83,16 @@ pub extern "C" fn capslock_check(base: usize, expected_tag: u64) {
 #[no_mangle]
 pub extern "C" fn capslock_revoke(base: usize) {
     let mut map = GLOBAL_SHADOW_MAP.write().unwrap();
-    
+
     if let Some(meta) = map.get_mut(&base) {
         // Rotate the tag to a new invalid value.
         // Any Rust code holding the old tag will now fail the check.
-        let new_tag = Tag(0xDEAD_BEEF); 
+        let new_tag = Tag(0xDEAD_BEEF);
         meta.active_tag = new_tag;
-        
-        println!("[Runtime] REVOKE: Foreign write detected at {:p}. Tag rotated to {:?}", base as *const (), new_tag);
+
+        println!(
+            "[Runtime] REVOKE: Foreign write detected at {:p}. Tag rotated to {:?}",
+            base as *const (), new_tag
+        );
     }
 }
