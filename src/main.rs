@@ -1,60 +1,48 @@
 mod runtime;
-use runtime::{check_access, track_alloc, track_borrow, Perm};
+use runtime::{track_alloc, track_borrow, check_access, Perm};
 
 fn main() {
-    println!(":: CapsLock-lite Reference Monitor ::");
-    println!(":: Scenario: Sibling Revocation (Aliasing XOR Mutability) ::\n");
+    println!(":: CapsLock-lite: Reference Monitor Test (Lazy Revocation) ::\n");
 
     let mut data = 100;
     let root_ptr = &mut data as *mut i32;
-
-    // 1. Initial Allocation
+    
+    // 1. Allocation
     track_alloc(root_ptr);
-    println!("[1] Allocated Root Owner (ptr: {:p})", root_ptr);
+    println!("[1] Allocated Root Owner.");
 
     // 2. Shared Borrow A
-    // We use pointer offsets to simulate distinct pointer identities for the map.
-    let ref_a = unsafe { root_ptr.add(1) };
+    let ref_a = unsafe { root_ptr.add(1) }; 
     track_borrow(root_ptr, ref_a, Perm::Shared);
-    println!("[2] Created ref_a (Shared Sibling A). Status: Active.");
+    println!("[2] Created ref_a (Shared).");
 
-    // 3. Shared Borrow B
-    // Multiple shared borrows are allowed to coexist (no revocation yet).
-    let ref_b = unsafe { root_ptr.add(2) };
-    track_borrow(root_ptr, ref_b, Perm::Shared);
-    println!("[3] Created ref_b (Shared Sibling B). Status: Active.");
-
-    // Verify liveness
-    print!("    Checking ref_a... ");
-    check_access(ref_a);
-    println!("OK.");
-    print!("    Checking ref_b... ");
-    check_access(ref_b);
-    println!("OK.");
-
-    // 4. Mutable Borrow C 
-    // A mutable borrow demands exclusivity, so this must revoke all previous siblings.
-    let mut_c = unsafe { root_ptr.add(3) };
-    println!("\n[4] Creating mut_c (Mutable Sibling C)...");
+    // 3. Mutable Borrow C (Lazy Trigger)
+    // Creation does not invalidate ref_a immediately (supports unused branches).
+    let mut_c = unsafe { root_ptr.add(2) }; 
     track_borrow(root_ptr, mut_c, Perm::Mutable);
-    println!("    -> Sibling Revocation Triggered: ref_a and ref_b should be invalidated.");
+    println!("[3] Created mut_c (Mutable).");
 
-    // 5. Verify Revocation
-    // Accessing ref_a should now trigger a security violation.
-    println!("\n[5] Attempting to access ref_a (Expect Panic)...");
+    // 4. Access ref_a (Valid)
+    // Proves ref_a coexists with unused mut_c.
+    print!("[4] Accessing ref_a (Pre-Mutation)... "); 
+    check_access(ref_a); 
+    println!("Success.");
 
+    // 5. Access mut_c (Revocation Event)
+    // Usage asserts exclusivity, invalidating siblings.
+    print!("[5] Accessing mut_c... "); 
+    check_access(mut_c);
+    println!("Success. Siblings invalidated.");
+
+    // 6. Access ref_a (Invalid)
+    println!("[6] Accessing ref_a (Post-Mutation)... Expecting Panic.");
+    
     let result = std::panic::catch_unwind(|| {
         check_access(ref_a);
     });
 
     match result {
-        Ok(_) => println!(" FAILURE: Security bypass detected!"),
-        Err(_) => println!(" SUCCESS: CapsLock caught the illegal access."),
+        Ok(_) => println!("FAILURE: Revocation failed!"),
+        Err(_) => println!("SUCCESS: Violation caught."),
     }
-
-    // 6. Verify Exclusivity
-    // The new mutable borrow should remain valid.
-    print!("\n[6] Checking mut_c ... ");
-    check_access(mut_c);
-    println!("OK.");
 }
