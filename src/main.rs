@@ -1,41 +1,60 @@
 mod runtime;
+use runtime::{check_access, track_alloc, track_borrow, Perm};
 
 fn main() {
-    println!("=== CapsLock-lite: Sibling Revocation Demo ===\n");
+    println!(":: CapsLock-lite Reference Monitor ::");
+    println!(":: Scenario: Sibling Revocation (Aliasing XOR Mutability) ::\n");
 
-    // 1. Allocate a base object
-    let mut data = Box::new(42);
-    let raw_base = &mut *data as *mut i32 as *mut u8;
-    
-    // Instrument: Allocation (Root Node)
-    runtime::instrumentation_alloc(raw_base, 4);
-    println!("[1] Alloc: Created Root Node for address {:?}", raw_base);
+    let mut data = 100;
+    let root_ptr = &mut data as *mut i32;
 
-    // 2. Create First Borrow (Child A)
-    // Simulating: let ref1 = &mut *data;
-    let ref1_ptr = unsafe { raw_base.add(0) }; // Same address, but logically new pointer
-    runtime::instrumentation_reborrow(raw_base, ref1_ptr); 
-    println!("[2] Reborrow: Created Child A (ref1) from Root");
+    // 1. Initial Allocation
+    track_alloc(root_ptr);
+    println!("[1] Allocated Root Owner (ptr: {:p})", root_ptr);
 
-    // 3. Create Second Borrow (Child B - Sibling to A)
-    // Simulating: let ref2 = &mut *data; (Shadowing or aliasing ref1)
-    let ref2_ptr = unsafe { raw_base.add(0) }; 
-    // Note: We reborrow from Root again, making this a sibling to ref1
-    runtime::instrumentation_reborrow(raw_base, ref2_ptr);
-    println!("[3] Reborrow: Created Child B (ref2) from Root (Sibling to A)");
+    // 2. Shared Borrow A
+    // We use pointer offsets to simulate distinct pointer identities for the map.
+    let ref_a = unsafe { root_ptr.add(1) };
+    track_borrow(root_ptr, ref_a, Perm::Shared);
+    println!("[2] Created ref_a (Shared Sibling A). Status: Active.");
 
-    // 4. Use Child B (Write)
-    println!("[4] Access: Writing to Child B (ref2)...");
-    runtime::instrumentation_write(ref2_ptr);
-    println!("    -> Success. This should revoke siblings (Child A).");
+    // 3. Shared Borrow B
+    // Multiple shared borrows are allowed to coexist (no revocation yet).
+    let ref_b = unsafe { root_ptr.add(2) };
+    track_borrow(root_ptr, ref_b, Perm::Shared);
+    println!("[3] Created ref_b (Shared Sibling B). Status: Active.");
 
-    // 5. Attempt to use Child A (Should Fail)
-    println!("[5] Access: Attempting to write to Child A (ref1)...");
-    println!("    -> Expecting Panic due to sibling revocation.");
-    
-    // This line should panic
-    runtime::instrumentation_write(ref1_ptr);
+    // Verify liveness
+    print!("    Checking ref_a... ");
+    check_access(ref_a);
+    println!("OK.");
+    print!("    Checking ref_b... ");
+    check_access(ref_b);
+    println!("OK.");
 
-    // Cleanup
-    runtime::instrumentation_free(raw_base);
+    // 4. Mutable Borrow C (The Trigger)
+    // A mutable borrow demands exclusivity, so this must revoke all previous siblings.
+    let mut_c = unsafe { root_ptr.add(3) };
+    println!("\n[4] Creating mut_c (Mutable Sibling C)...");
+    track_borrow(root_ptr, mut_c, Perm::Mutable);
+    println!("    -> Sibling Revocation Triggered: ref_a and ref_b should be invalidated.");
+
+    // 5. Verify Revocation
+    // Accessing ref_a should now trigger a security violation.
+    println!("\n[5] Attempting to access ref_a (Expect Panic)...");
+
+    let result = std::panic::catch_unwind(|| {
+        check_access(ref_a);
+    });
+
+    match result {
+        Ok(_) => println!(" FAILURE: Security bypass detected!"),
+        Err(_) => println!(" SUCCESS: CapsLock caught the illegal access."),
+    }
+
+    // 6. Verify Exclusivity
+    // The new mutable borrow should remain valid.
+    print!("\n[6] Checking mut_c ... ");
+    check_access(mut_c);
+    println!("OK.");
 }
