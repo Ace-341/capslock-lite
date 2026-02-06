@@ -32,7 +32,7 @@ fn main() {
     check_access(ref_b);
     println!("OK.");
 
-    // 4. Mutable Borrow C (The Trigger)
+    // 4. Mutable Borrow C 
     // A mutable borrow demands exclusivity, so this must revoke all previous siblings.
     let mut_c = unsafe { root_ptr.add(3) };
     println!("\n[4] Creating mut_c (Mutable Sibling C)...");
