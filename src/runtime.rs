@@ -7,7 +7,6 @@ pub enum Perm {
     Mutable,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Node {
     id: usize,
@@ -55,7 +54,6 @@ impl BorrowTree {
     }
 
     /// Recursively invalidates a node and its entire subtree.
-    /// Uses an iterative stack approach to prevent stack overflow on deep trees.
     fn deep_revoke(&mut self, id: usize) {
         if id >= self.nodes.len() { return; }
         let mut stack = vec![id];
@@ -69,12 +67,21 @@ impl BorrowTree {
         }
     }
 
+    /// Invalidates all descendants of a node.
+    fn revoke_all_children(&mut self, id: usize) {
+        if id >= self.nodes.len() { return; }
+        
+        let children = self.nodes[id].children.clone();
+        for child in children {
+            self.deep_revoke(child);
+        }
+        self.nodes[id].children.clear();
+    }
+
     /// Enforces exclusivity: invalidates all sibling nodes except the survivor.
-    /// This is triggered when a Mutable capability is exercised.
     fn revoke_siblings_except(&mut self, parent_id: usize, survivor_id: usize) {
         if parent_id >= self.nodes.len() { return; }
         
-        // Clone children list to avoid borrow conflicts during mutation
         let siblings = self.nodes[parent_id].children.clone();
         for sib in siblings {
             if sib != survivor_id {
@@ -82,21 +89,33 @@ impl BorrowTree {
             }
         }
         
-        // Prune the parent's children list to reflect the new state
         if let Some(parent) = self.nodes.get_mut(parent_id) {
             parent.children.retain(|&x| x == survivor_id);
+        }
+    }
+
+    /// Invalidates only MUTABLE siblings. 
+    fn revoke_mutable_siblings(&mut self, parent_id: usize, survivor_id: usize) {
+        if parent_id >= self.nodes.len() { return; }
+        
+        let siblings = self.nodes[parent_id].children.clone();
+        for sib in siblings {
+            if sib != survivor_id && self.nodes[sib].permission == Perm::Mutable {
+                self.deep_revoke(sib);
+            }
         }
     }
 
     fn is_valid(&self, id: usize) -> bool {
         let mut curr = Some(id);
         while let Some(idx) = curr {
-            let node = match self.nodes.get(idx) {
-                Some(n) => n,
+            match self.nodes.get(idx) {
+                Some(node) => {
+                    if !node.active { return false; }
+                    curr = node.parent;
+                }
                 None => return false,
-            };
-            if !node.active { return false; }
-            curr = node.parent;
+            }
         }
         true
     }
@@ -132,12 +151,9 @@ impl Runtime {
         self.shadow_map.insert(addr, root_id);
     }
 
-    /// Registers a new borrow derived from a parent pointer.
-    /// Implements Lazy Revocation: No invalidation occurs at creation time 
-    /// to allow valid pointers in unused branches to survive.
     pub fn handle_reborrow(&mut self, parent_addr: usize, new_addr: usize, perm: Perm) {
         let parent_id = match self.shadow_map.get(&parent_addr) {
-            Some(&id) => id,
+            Some(id) => *id, 
             None => panic!("[Security] Reborrow from untracked address 0x{:x}", parent_addr),
         };
 
@@ -149,31 +165,33 @@ impl Runtime {
         }
     }
 
-    /// Validates access permissions and enforces the Aliasing XOR Mutability policy.
-    /// Revocation is triggered here (Revoke-on-Use).
     pub fn handle_access(&mut self, addr: usize) {
         let id = match self.shadow_map.get(&addr) {
             Some(id) => *id, 
-            None => return, // Ignore untracked memory
+            None => return, 
         };
 
-        // 1. Validate Provenance
         if !self.tree.is_valid(id) {
             panic!("[Security Violation] Use-After-Free/Revocation at 0x{:x}", addr);
         }
 
-        // 2. Enforce Exclusivity (Lazy Revocation)
-        // If the accessed pointer is Mutable, it asserts exclusivity over the resource,
-        // invalidating any existing siblings.
-        if self.tree.get_perm(id) == Perm::Mutable {
-            if let Some(parent) = self.tree.get_parent(id) {
+        let perm = self.tree.get_perm(id);
+
+        // 1. Vertical Enforcement (Writer kills Children)
+        if perm == Perm::Mutable {
+            self.tree.revoke_all_children(id);
+        }
+
+        // 2. Horizontal Enforcement (Siblings)
+        if let Some(parent) = self.tree.get_parent(id) {
+            if perm == Perm::Mutable {
                 self.tree.revoke_siblings_except(parent, id);
+            } else if perm == Perm::Shared {
+                self.tree.revoke_mutable_siblings(parent, id);
             }
         }
     }
 }
-
-// --- Public API ---
 
 pub fn track_alloc<T>(ptr: *const T) {
     RT.with(|rt| rt.borrow_mut().handle_alloc(ptr as usize));
